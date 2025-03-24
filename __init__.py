@@ -329,7 +329,7 @@ class Command:
         ct.ed.set_prop(ct.PROP_TAB_TITLE, title)
 
         self.diff_tabs.append(title)
-        
+
         # set lexers
         a_ed = ct.Editor(ct.ed.get_prop(ct.PROP_HANDLE_PRIMARY))
         b_ed = ct.Editor(ct.ed.get_prop(ct.PROP_HANDLE_SECONDARY))
@@ -889,7 +889,7 @@ class Command:
 
         e1.focus() # otherwise cmd_FileClose will be applied to wrong editor
         e1.cmd(ct_cmd.cmd_FileClose)
-        
+
         self.reopen_sep_tabs((fn1, fn2))
 
     def reopen_sep_tabs(self, filenames):
@@ -911,8 +911,18 @@ class Command:
             else:
                 ct.file_open(fn, options='/nohistory')
 
-    def on_close_pre(self, ed_self: ct.Editor):
+    def on_close(self, ed_self: ct.Editor):
+        # after closing differ open the compared files
+        if ed_self.get_prop(ct.PROP_EDITORS_LINKED):
+            return
+        e1 = ct.Editor(ed_self.get_prop(ct.PROP_HANDLE_PRIMARY))
+        e2 = ct.Editor(ed_self.get_prop(ct.PROP_HANDLE_SECONDARY))
+        fn1 = e1.get_filename()
+        fn2 = e2.get_filename()
+        ct.file_open(fn1)
+        ct.file_open(fn2)
 
+    def on_close_pre(self, ed_self: ct.Editor):
         title = ed_self.get_prop(ct.PROP_TAB_TITLE, '')
         if title in self.diff_tabs:
             self.diff_tabs.remove(title)
