@@ -100,6 +100,7 @@ DIFF_TAB_COUNT = 1
 TIMESTAMP_BEGIN = '_{'
 TIMESTAMP_END = '}.txt'
 
+untitled_opened = False
 
 def get_temp_name(e: ct.Editor):
     global TEMP_DIR
@@ -288,6 +289,8 @@ class Command:
         return False
 
     def set_files(self, file0, file1):
+        global untitled_opened
+        untitled_opened = False
         files = [file0, file1]
         lexers = [None, None]
         for (index, name) in enumerate(files):
@@ -302,6 +305,13 @@ class Command:
                         with open(temp_fn, 'w', encoding='utf8') as f:
                             f.write(temp_text)
                         files[index] = temp_fn
+                        # close untitled-tab
+                        e.set_prop(ct.PROP_MODIFIED, False)
+                        e.focus()
+                        e.cmd(ct_cmd.cmd_FileClose)
+                        ct.app_idle(True)  # better close file
+                        sleep(0.3)
+                        ct.app_idle(True)  # better close file
                     else:
                         if e.get_prop(ct.PROP_MODIFIED):
                             text = _('First you must save file:\n{}').format(name)
@@ -329,7 +339,7 @@ class Command:
         ct.ed.set_prop(ct.PROP_TAB_TITLE, title)
 
         self.diff_tabs.append(title)
-        
+
         # set lexers
         a_ed = ct.Editor(ct.ed.get_prop(ct.PROP_HANDLE_PRIMARY))
         b_ed = ct.Editor(ct.ed.get_prop(ct.PROP_HANDLE_SECONDARY))
@@ -889,7 +899,7 @@ class Command:
 
         e1.focus() # otherwise cmd_FileClose will be applied to wrong editor
         e1.cmd(ct_cmd.cmd_FileClose)
-        
+
         self.reopen_sep_tabs((fn1, fn2))
 
     def reopen_sep_tabs(self, filenames):
@@ -911,8 +921,35 @@ class Command:
             else:
                 ct.file_open(fn, options='/nohistory')
 
-    def on_close_pre(self, ed_self: ct.Editor):
+    def on_close(self, ed_self: ct.Editor):
+        # after closing differ open the compared files
+        if ed_self.get_prop(ct.PROP_EDITORS_LINKED):
+            return
+        e1 = ct.Editor(ed_self.get_prop(ct.PROP_HANDLE_PRIMARY))
+        e2 = ct.Editor(ed_self.get_prop(ct.PROP_HANDLE_SECONDARY))
+        fn1 = e1.get_filename()
+        fn2 = e2.get_filename()
+        global untitled_opened
+        if TEMP_DIR in fn1 and TEMP_DIR in fn2:
+            if not untitled_opened:
+                for h in ct.ed_handles():
+                    e = ct.Editor(h)
+                    if e.get_filename() == '' and e.get_text_all() == '':
+                        e.set_text_all(e1.get_text_all())
+                        ct.file_open('')
+                        ct.ed.set_text_all(e2.get_text_all())
+                    else:
+                        ct.file_open('')
+                        ct.ed.set_text_all(e1.get_text_all())
+                        ct.file_open('')
+                        ct.ed.set_text_all(e2.get_text_all())
+                    break
+                untitled_opened = True
+        else:
+            ct.file_open(fn1)
+            ct.file_open(fn2)
 
+    def on_close_pre(self, ed_self: ct.Editor):
         title = ed_self.get_prop(ct.PROP_TAB_TITLE, '')
         if title in self.diff_tabs:
             self.diff_tabs.remove(title)
