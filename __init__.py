@@ -27,7 +27,7 @@ DECOR_CHAR = '■'
 DEFAULT_SYNC_SCROLL = '1'
 U_PREFIX = 'untitled:'
 
-PLG_NAME = 'Differ'
+PLG_NAME = _('Differ')
 METAJSONFILE = os.path.dirname(__file__) + os.sep + 'differ_opts.json'
 JSONFILE = 'cuda_differ.json'  # To store in settings/cuda_differ.json
 JSONPATH = ct.app_path(ct.APP_DIR_SETTINGS) + os.sep + JSONFILE
