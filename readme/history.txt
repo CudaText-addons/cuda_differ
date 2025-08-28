@@ -1,3 +1,6 @@
+2025.03.24
+* change: after closing differ open the compared files
+
 2025.03.21
 + add: on app exiting, delete all files in the folder settings/differ_backup (only with CudaText option "ui_one_instance":true)
 
@@ -23,7 +26,7 @@
 2023.03.11
 * change: for untitled compared buffers, use folder settings/differ_backup instead of OS TEMP
 + add: use time-stamps in the filenames of temp files
-+ add: restore 'untitled' titles when returning back from pair-view to 2 tabs 
++ add: restore 'untitled' titles when returning back from pair-view to 2 tabs
 
 2023.03.09
 - fix: reverted "clean temp-dir on exiting", we may have untitled tabs saved there

@@ -14,7 +14,7 @@ class ScrollSplittedTab:
         self.tab_id = set()
 
     def toggle(self, on=True):
-        ev = 'on_state,on_caret,on_change_slow,on_tab_menu,on_close_pre,on_exit'
+        ev = 'on_state,on_caret,on_change_slow,on_tab_menu,on_close_pre,on_close,on_exit'
         if on:
             if ct.ed.get_prop(ct.PROP_TAB_ID) in self.tab_id:
                 ev = 'on_scroll,'+ev
