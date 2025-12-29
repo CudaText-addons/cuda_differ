@@ -14,12 +14,8 @@ class ScrollSplittedTab:
         self.tab_id = set()
 
     def toggle(self, on=True):
-        ev = 'on_state,on_caret,on_change_slow,on_tab_menu,on_close_pre,on_exit'
-        if on:
-            if ct.ed.get_prop(ct.PROP_TAB_ID) in self.tab_id:
-                ev = 'on_scroll,'+ev
-        ct.app_proc(ct.PROC_SET_EVENTS, self.name+';'+ev+';;')
-        #print('Differ set events:', ev)
+        act = ct.PROC_EVENTS_SUB if on and ct.ed.get_prop(ct.PROP_TAB_ID) in self.tab_id else ct.PROC_EVENTS_UNSUB
+        ct.app_proc(act, self.name+';on_scroll;;')
 
     def on_scroll(self, ed_self):
         if ed_self.get_prop(ct.PROP_SPLIT)[0] == '-':
