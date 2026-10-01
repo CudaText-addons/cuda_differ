@@ -170,6 +170,6 @@ Available options include:
   Alexey Torgashin (CudaText)
   Andrey Kvichanskiy, https://github.com/kvichans
   Vivalzar, https://github.com/Vivalzar
-  Badr Elmers, https://github.com/badrelmers
+  Bzdr Elmers, https://github.com/badrelmers
 
 License: MIT
