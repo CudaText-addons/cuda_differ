@@ -100,4 +100,4 @@ menu=o
 
 [item100]
 section=events
-events=on_state~,on_caret~,on_change_slow~,on_tab_menu,on_close~,on_save~,on_exit_pre~
+events=on_state~,on_caret~,on_change_slow~,on_tab_menu,on_close_pre~,on_exit

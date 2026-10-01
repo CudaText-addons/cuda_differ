@@ -1,8 +1,10 @@
 import os
 import json
+from time import sleep
 import typing as tp
 from pathlib import Path
 from datetime import datetime
+#from time import strftime
 
 import cudatext as ct
 import cudatext_cmd as ct_cmd
@@ -97,42 +99,9 @@ TEMP_DIR = os.path.join(ct.app_path(ct.APP_DIR_SETTINGS), 'differ_backup')
 DIFF_TAB_COUNT = 1
 TIMESTAMP_BEGIN = '_{'
 TIMESTAMP_END = '}.txt'
-# Delimiters wrapping the original tab's PROP_TAB_ID inside temp filenames,
-# so we can sync changes back to the original tab even after restarts/renames.
-TEMP_ID_BEGIN = '_['
-TEMP_ID_END = ']_'
-# Persistent state file: stores compare-tab IDs and their temp-file mappings.
-# Keyed by compare tab's PROP_TAB_ID so it survives restarts and renames.
-# Structure:
-# {
-#   "compare_tabs": {
-#     "<compare_tab_id>": {
-#       "session": "<path of session when compare was created>",  # may be ""
-#       "pairs": [
-#         {"temp_fn": "...", "orig_fn": "..."},   # primary half
-#         {"temp_fn": "...", "orig_fn": "..."}    # secondary half
-#       ]
-#     }
-#   }
-# }
-# orig_fn is "" for untitled originals (those rely on PROP_TAB_ID only).
-STATE_FILE = os.path.join(ct.app_path(ct.APP_DIR_SETTINGS), 'cuda_differ_state.json')
-# Path to plugins.ini -- used to persistently subscribe to on_start so the
-# plugin auto-loads on next CudaText startup when compare tabs are active.
-PLUGINS_INI = os.path.join(ct.app_path(ct.APP_DIR_SETTINGS), 'plugins.ini')
-PLUGINS_INI_SECTION = 'events'
-MODULE_NAME = __name__.split('.')[-1]  # e.g. 'cuda_differ'
 
 
 def get_temp_name(e: ct.Editor):
-    """Build a unique temp filename in differ_backup.
-
-    The filename embeds the original tab's PROP_TAB_ID so we can find the
-    original tab later to sync changes back -- even after CudaText restarts
-    or the original tab is renamed. Format:
-
-        {title}_[{tab_id}]_{YYYY.MM.DD-HH.MM}-{N}.txt
-    """
     global TEMP_DIR
     if not os.path.isdir(TEMP_DIR):
         os.mkdir(TEMP_DIR)
@@ -141,37 +110,11 @@ def get_temp_name(e: ct.Editor):
     cnt = 0
     now = datetime.now()
     title = e.get_prop(ct.PROP_TAB_TITLE)
-    tab_id = e.get_prop(ct.PROP_TAB_ID)
     while True:
         cnt += 1
-        fn = os.path.join(
-            TEMP_DIR,
-            title
-            + TEMP_ID_BEGIN + str(tab_id) + TEMP_ID_END
-            + TIMESTAMP_BEGIN + now.strftime('%Y.%m.%d-%H.%M') + '-' + str(cnt)
-            + TIMESTAMP_END
-        )
+        fn = os.path.join(TEMP_DIR, title+TIMESTAMP_BEGIN+now.strftime('%Y.%m.%d-%H.%M')+'-'+str(cnt)+TIMESTAMP_END)
         if not os.path.isfile(fn):
             return fn
-
-
-def parse_tab_id_from_temp(fn):
-    """Extract the original tab's PROP_TAB_ID from a Differ temp filename.
-
-    Returns int, or None if the filename doesn't contain an ID
-    (e.g., old-format temp files created before this change).
-    """
-    base = os.path.basename(fn)
-    i = base.find(TEMP_ID_BEGIN)
-    if i < 0:
-        return None
-    j = base.find(TEMP_ID_END, i + len(TEMP_ID_BEGIN))
-    if j < 0:
-        return None
-    try:
-        return int(base[i + len(TEMP_ID_BEGIN):j])
-    except ValueError:
-        return None
 
 
 _homedir = os.path.expanduser('~')
@@ -203,16 +146,27 @@ def prettify_pair_title(title):
     if len(names) != 2:
         return
     for (i, s) in enumerate(names):
-        # Strip the tab-id portion if present (new format).
-        n = s.find(TEMP_ID_BEGIN)
-        if n > 0:
-            s = s[:n]
-        # Strip the timestamp portion if present.
         n = s.find(TIMESTAMP_BEGIN)
-        if n > 0 and s.endswith(TIMESTAMP_END):
-            s = s[:n]
-        names[i] = s
+        if n>0 and s.endswith(TIMESTAMP_END):
+            names[i] = s[:n]
     return SEP.join(names)
+
+
+
+def delete_all_files_in_folder(folder_path):
+    if not os.path.exists(folder_path):
+        # print(f"ERROR: Differ: Folder {folder_path} does not exist")
+        return
+
+    for filename in os.listdir(folder_path):
+        file_path = os.path.join(folder_path, filename)
+        try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)  # Remove the file
+            # elif os.path.isdir(file_path):
+            #    shutil.rmtree(file_path)  # Remove the directory
+        except Exception as e:
+            print(f'ERROR: Differ failed to delete "{file_path}", reason: {e}')
 
 
 class Command:
@@ -221,109 +175,12 @@ class Command:
         self.cfg = self.get_config()
         self.diff = df.Differ()
         self.diff_dlg = DifferDialog()
-        # Set to True by on_exit_pre when CudaText is about to exit, so that
-        # on_close (which fires next, once per closing tab) can skip
-        # temp-file deletion and let compare tabs persist across restarts.
-        self._app_exiting = False
+        self.diff_tabs = []
 
         self.compare_menu = None
         self.menuid_sep = None
         self.menuid_withfile = None
         self.menuid_withtab = None
-
-    def _load_state(self):
-        """Load the persisted compare-tab state. Prunes stale entries
-        (compare tabs whose temp files no longer exist on disk)."""
-        try:
-            with open(STATE_FILE, 'r', encoding='utf8') as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return {'compare_tabs': {}}
-        if not isinstance(data, dict) or not isinstance(data.get('compare_tabs'), dict):
-            return {'compare_tabs': {}}
-        ctabs = data['compare_tabs']
-        cleaned = {}
-        for tab_id_str, entry in ctabs.items():
-            if not isinstance(entry, dict):
-                continue
-            pairs = entry.get('pairs')
-            if not isinstance(pairs, list):
-                continue
-            # Keep entry only if at least one temp file still exists.
-            if any(isinstance(p, dict) and os.path.isfile(p.get('temp_fn', '')) for p in pairs):
-                cleaned[tab_id_str] = entry
-        if len(cleaned) != len(ctabs):
-            self._save_state({'compare_tabs': cleaned})
-        return {'compare_tabs': cleaned}
-
-    def _save_state(self, state):
-        """Save the compare-tab state to disk."""
-        try:
-            with open(STATE_FILE, 'w', encoding='utf8') as f:
-                json.dump(state, f, indent=2)
-        except OSError as ex:
-            msg('failed to save state file: {}'.format(ex), level=2)
-
-    def _is_compare_tab(self, tab_id):
-        """Check if the given PROP_TAB_ID belongs to a compare tab."""
-        state = self._load_state()
-        return str(tab_id) in state['compare_tabs']
-
-    def _register_compare_tab(self, compare_tab_id, pairs, session_path=''):
-        """Register a compare tab with its temp-file/original-filename pairs
-        and the session path the compare belongs to.
-
-        pairs: list of 2 dicts: [{"temp_fn": ..., "orig_fn": ...}, ...]
-        session_path: path of the active session when the compare was created.
-        """
-        state = self._load_state()
-        state['compare_tabs'][str(compare_tab_id)] = {
-            'session': session_path or '',
-            'pairs': pairs,
-        }
-        self._save_state(state)
-
-    def _unregister_compare_tab(self, compare_tab_id):
-        """Remove a compare tab from the persisted state. Returns the
-        removed entry dict (with 'session' and 'pairs') or None if not found."""
-        state = self._load_state()
-        key = str(compare_tab_id)
-        entry = state['compare_tabs'].pop(key, None)
-        if entry is not None:
-            self._save_state(state)
-        return entry
-
-    def _find_orig_fn_for_temp(self, temp_fn):
-        """Search the persisted state for the original filename associated
-        with a given temp filename. Returns "" for untitled originals, or
-        None if not found."""
-        state = self._load_state()
-        for entry in state['compare_tabs'].values():
-            if not isinstance(entry, dict):
-                continue
-            for p in entry.get('pairs', []):
-                if isinstance(p, dict) and p.get('temp_fn') == temp_fn:
-                    return p.get('orig_fn', '')
-        return None
-
-    def _enable_autostart(self):
-        """Persistently subscribe to on_start via plugins.ini so the plugin
-        auto-loads on next CudaText startup. This ensures lazy events
-        (on_save~, on_close~) fire after restart when compare tabs
-        are restored from session."""
-        current = ct.ini_read(PLUGINS_INI, PLUGINS_INI_SECTION, MODULE_NAME, '')
-        if current == 'on_start':
-            return
-        ct.ini_write(PLUGINS_INI, PLUGINS_INI_SECTION, MODULE_NAME, 'on_start')
-
-    def _disable_autostart(self):
-        """Remove the on_start subscription from plugins.ini so the plugin
-        does NOT auto-load on next startup (no overhead when no compare
-        tabs are active)."""
-        current = ct.ini_read(PLUGINS_INI, PLUGINS_INI_SECTION, MODULE_NAME, '')
-        if not current:
-            return
-        ct.ini_proc(ct.INI_DELETE_KEY, PLUGINS_INI, PLUGINS_INI_SECTION, MODULE_NAME)
 
     def change_config(self):
         try:
@@ -433,31 +290,34 @@ class Command:
     def set_files(self, file0, file1):
         files = [file0, file1]
         lexers = [None, None]
-        # Collect (temp_fn, orig_fn) pairs for each half so we can register
-        # the compare tab by its PROP_TAB_ID after file_open.
-        pairs = []
         for (index, name) in enumerate(files):
             for h in ct.ed_handles():
                 e = ct.Editor(h)
+                e_titled = e.get_filename()!=''
                 if self.is_match_name(e, name):
                     lexers[index] = e.get_prop(ct.PROP_LEXER_FILE)
-                    # Always create a temp file copy and leave the original
-                    # tab open. The temp filename embeds the original tab's
-                    # PROP_TAB_ID so we can sync changes back later, even
-                    # after restarts or renames.
-                    temp_text = e.get_text_all()
-                    temp_fn = get_temp_name(e)
-                    if temp_fn is None:
-                        return
-                    try:
+                    if not e_titled:
+                        temp_text = e.get_text_all()
+                        temp_fn = get_temp_name(e)
                         with open(temp_fn, 'w', encoding='utf8') as f:
                             f.write(temp_text)
-                    except OSError as ex:
-                        msg('failed to create temp file: {}'.format(ex), level=2)
-                        return
-                    orig_fn = e.get_filename() or ''
-                    pairs.append({'temp_fn': temp_fn, 'orig_fn': orig_fn})
-                    files[index] = temp_fn
+                        files[index] = temp_fn
+                    else:
+                        if e.get_prop(ct.PROP_MODIFIED):
+                            text = _('First you must save file:\n{}').format(name)
+                            mb = ct.msg_box(text, ct.MB_OKCANCEL+ct.MB_ICONQUESTION)
+                            if mb == ct.ID_OK:
+                                if not e.save():
+                                    return
+                            else:
+                                return
+
+                        e.focus()
+                        e.cmd(ct_cmd.cmd_FileClose)
+
+                        ct.app_idle(True)  # better close file
+                        sleep(0.3)
+                        ct.app_idle(True)  # better close file
                     break
 
         ct.file_open(files, options='/nohistory')
@@ -468,21 +328,7 @@ class Command:
             title = title2
         ct.ed.set_prop(ct.PROP_TAB_TITLE, title)
 
-        # Register the compare tab by its PROP_TAB_ID (persists restarts,
-        # invariant under renames/moves). This replaces the old title-based
-        # diff_tabs list which broke after restart or tab rename.
-        # Also store the active session path so the user can tell which
-        # session a saved compare tab belongs to when inspecting the JSON.
-        compare_tab_id = ct.ed.get_prop(ct.PROP_TAB_ID)
-        try:
-            session_path = ct.app_path(ct.APP_FILE_SESSION) or ''
-        except Exception:
-            session_path = ''
-        self._register_compare_tab(compare_tab_id, pairs, session_path)
-
-        # Persistently subscribe to on_start so the plugin auto-loads on
-        # next startup and lazy events (on_save~) fire after restart.
-        self._enable_autostart()
+        self.diff_tabs.append(title)
         
         # set lexers
         a_ed = ct.Editor(ct.ed.get_prop(ct.PROP_HANDLE_PRIMARY))
@@ -528,7 +374,7 @@ class Command:
             self.refresh()
 
     def on_scroll(self, ed_self):
-        if self._is_compare_tab(ed_self.get_prop(ct.PROP_TAB_ID)):
+        if ed_self.get_prop(ct.PROP_TAB_TITLE, '') in self.diff_tabs:
             self.scroll.on_scroll(ed_self)
 
     def on_caret(self, ed_self):
@@ -538,169 +384,6 @@ class Command:
     def on_change_slow(self, ed_self):
         if self.cfg.get('enable_auto_refresh', False):
             self.refresh()
-
-    def on_save(self, ed_self):
-        """When a Differ temp file is saved in the compare view, sync the
-        saved content back to the original tab it was created from.
-
-        Also SAVE the sibling editor (the other half of the split) to disk
-        and sync it too, so pressing Ctrl+S in one half saves both halves.
-        A re-entrancy guard prevents infinite recursion when the sibling's
-        save triggers this handler again."""
-        fn = ed_self.get_filename()
-        if not fn or TEMP_DIR not in fn:
-            return
-
-        # Re-entrancy guard: if we're already inside on_save (called
-        # recursively via sibling.save()), just sync and return without
-        # trying to save the sibling again.
-        if getattr(self, '_in_on_save', False):
-            self._sync_editor_to_original(ed_self)
-            return
-
-        self._in_on_save = True
-        try:
-            # Sync the editor that was just saved.
-            self._sync_editor_to_original(ed_self)
-
-            # Find the sibling editor (the other half of the split).
-            h_self = ed_self.get_prop(ct.PROP_HANDLE_SELF)
-            h_primary = ed_self.get_prop(ct.PROP_HANDLE_PRIMARY)
-            h_secondary = ed_self.get_prop(ct.PROP_HANDLE_SECONDARY)
-            if h_self == h_primary and h_secondary:
-                sibling = ct.Editor(h_secondary)
-            elif h_self == h_secondary and h_primary:
-                sibling = ct.Editor(h_primary)
-            else:
-                sibling = None
-
-            if sibling is not None:
-                sib_fn = sibling.get_filename()
-                if sib_fn and TEMP_DIR in sib_fn:
-                    # If the sibling is modified, save it to disk. This
-                    # triggers on_save(sibling), which syncs the sibling
-                    # to its original. The guard prevents recursion.
-                    if sibling.get_prop(ct.PROP_MODIFIED):
-                        sibling.save()
-                    else:
-                        # Sibling not modified, just sync current content.
-                        self._sync_editor_to_original(sibling)
-        finally:
-            self._in_on_save = False
-
-    def _sync_editor_to_original(self, ed):
-        """Sync a single compare-half editor's content back to its original
-        tab. Tries PROP_TAB_ID first (parsed from temp filename), then
-        falls back to filename from the persisted state."""
-        fn = ed.get_filename()
-        if not fn or TEMP_DIR not in fn:
-            return
-        new_text = ed.get_text_all()
-        tab_id = parse_tab_id_from_temp(fn)
-
-        # Strategy 1: find the original by PROP_TAB_ID (parsed from temp
-        # filename). This is the primary mechanism and works if the ID
-        # persists across restarts (which it should per the API).
-        if tab_id is not None:
-            if self._sync_back_to_original(tab_id, new_text):
-                return
-
-        # Strategy 2: fallback -- find the original by filename from the
-        # persisted state. Used after restart if PROP_TAB_ID did not match.
-        orig_fn = self._find_orig_fn_for_temp(fn)
-        if orig_fn:
-            for h in ct.ed_handles():
-                e = ct.Editor(h)
-                if e.get_filename() == orig_fn:
-                    self._apply_text_preserving_undo(e, new_text)
-                    self._save_or_mark_original(e)
-                    ct.msg_status(_('Differ: synced changes to original tab (by filename)'))
-                    return
-
-        ct.msg_status(_('Differ: original tab no longer open; changes saved to temp file only'))
-
-    def _save_or_mark_original(self, e):
-        """After syncing content to an original tab: if it's a real file on
-        disk, save it immediately so the file reflects the changes. If it's
-        an untitled tab (no filename), just mark it modified without
-        triggering a Save dialog -- the user can save it later if desired."""
-        orig_fn = e.get_filename()
-        if orig_fn:
-            # Real file on disk -- save it.
-            e.save()
-        else:
-            # Untitled tab -- mark modified so the user sees the dot,
-            # but don't trigger a Save dialog.
-            e.set_prop(ct.PROP_MODIFIED, True)
-
-    def _apply_text_preserving_undo(self, ed, new_text):
-        """Replace the entire editor text while preserving Undo history.
-        Uses replace_lines() instead of set_text_all() which would destroy
-        Undo information."""
-        caret = ed.get_carets()
-        try:
-            lines = new_text.split('\n')
-            count = ed.get_line_count()
-            if count > 0:
-                ed.replace_lines(0, count - 1, lines)
-            else:
-                ed.insert(0, 0, new_text)
-        except Exception as ex:
-            # Fallback to set_text_all if replace_lines fails for any reason.
-            msg('replace_lines failed, falling back to set_text_all: {}'.format(ex), level=1)
-            ed.set_text_all(new_text)
-        if caret:
-            x, y, x2, y2 = caret[0]
-            try:
-                ed.set_caret(x, y, x2, y2)
-            except Exception:
-                pass
-
-    def _sync_back_to_original(self, tab_id, new_text):
-        """Find the original tab by PROP_TAB_ID and overwrite its content
-        (preserving Undo via replace_lines).
-
-        If the original is a real file on disk, it's saved immediately.
-        If it's an untitled tab, it's marked modified without triggering
-        a Save dialog. Returns True if the original was found."""
-        # Compare as strings to avoid int/str type mismatches.
-        target = str(tab_id)
-        for h in ct.ed_handles():
-            e = ct.Editor(h)
-            if str(e.get_prop(ct.PROP_TAB_ID)) == target:
-                self._apply_text_preserving_undo(e, new_text)
-                self._save_or_mark_original(e)
-                ct.msg_status(_('Differ: synced changes to original tab (by tab id)'))
-                return True
-        return False
-
-    def on_start(self, ed_self):
-        """Called once on program start. The plugin is loaded because it was
-        subscribed to on_start via plugins.ini (set when a compare tab was
-        active). Just being loaded is enough -- all lazy events (on_save~,
-        on_close~) will now fire.
-
-        We also rebuild the in-memory scroll sync set from the persisted
-        state and re-subscribe to on_scroll so synchronized scrolling works
-        in restored compare tabs without needing a manual refresh."""
-        state = self._load_state()  # prunes stale entries
-        # Rebuild scroll.tab_id set from persisted compare tab IDs so that
-        # ScrollSplittedTab.toggle() works correctly after restart.
-        self.scroll.tab_id = set()
-        for tab_id_str in state['compare_tabs']:
-            try:
-                self.scroll.tab_id.add(int(tab_id_str))
-            except (ValueError, TypeError):
-                pass
-        # Re-subscribe to on_scroll event if sync_scroll is enabled.
-        if self.cfg.get('sync_scroll') and self.scroll.tab_id:
-            ct.app_proc(ct.PROC_EVENTS_SUB, self.scroll.name+';on_scroll;;')
-
-    def on_exit_pre(self, ed_self):
-        """Called before CudaText is about to exit. Sets a flag so that
-        on_close (which fires next, once per closing tab) can skip
-        temp-file deletion and let compare tabs persist across restarts."""
-        self._app_exiting = True
 
     '''
     def on_tab_change(self, ed_self):
@@ -1036,6 +719,7 @@ class Command:
             if fc == 1:
                 return
             text = get_lines(eds[0])
+            print(text)
             if text:
                 eds[1].insert(0, b0, text)
         else:
@@ -1194,101 +878,56 @@ class Command:
         self.move_to_sep_tabs_ex(e)
 
     def move_to_sep_tabs_ex(self, e: ct.Editor):
-        """Close the compare tab and focus the first original tab.
 
-        Originals are always left open (we never close them when starting
-        a compare). The on_close handler deletes the temp files
-        belonging to this compare tab."""
         if e.get_prop(ct.PROP_EDITORS_LINKED):
             return
-
-        # Collect original tab IDs from temp filenames before closing,
-        # so we can focus an original tab afterwards.
-        original_ids = []
-        for h in (e.get_prop(ct.PROP_HANDLE_PRIMARY),
-                  e.get_prop(ct.PROP_HANDLE_SECONDARY)):
-            if not h:
-                continue
-            sub = ct.Editor(h)
-            fn = sub.get_filename()
-            if fn and TEMP_DIR in fn:
-                tab_id = parse_tab_id_from_temp(fn)
-                if tab_id is not None:
-                    original_ids.append(tab_id)
-
-        # Close the compare tab. on_close will delete this tab's temp files.
         e1 = ct.Editor(e.get_prop(ct.PROP_HANDLE_PRIMARY))
-        e1.focus()  # otherwise cmd_FileClose may hit the wrong editor
+        e2 = ct.Editor(e.get_prop(ct.PROP_HANDLE_SECONDARY))
+
+        fn1 = e1.get_filename()
+        fn2 = e2.get_filename()
+
+        e1.focus() # otherwise cmd_FileClose will be applied to wrong editor
         e1.cmd(ct_cmd.cmd_FileClose)
+        
+        self.reopen_sep_tabs((fn1, fn2))
 
-        # Focus the first original tab that is still open.
-        for tab_id in original_ids:
-            for h in ct.ed_handles():
-                ee = ct.Editor(h)
-                if ee.get_prop(ct.PROP_TAB_ID) == tab_id:
-                    ee.focus()
-                    return
+    def reopen_sep_tabs(self, filenames):
 
-    def on_close(self, ed_self: ct.Editor):
-        """Fires after the close is confirmed (user clicked Save or Discard
-        in the dialog, or the tab wasn't modified). The editor is still
-        active at this point, so we can still read its content and
-        PROP_HANDLE_PRIMARY/SECONDARY.
+        '''
+        def short_title(s):
+            s = os.path.basename(s)
+            n = s.find(TIMESTAMP_BEGIN)
+            if n>0 and s.endswith(TIMESTAMP_END):
+                s = s[:n]
+                return s
+            return '' # '' means to remove custom title
+        '''
 
-        For a compare tab: delete its temp files and unregister it from the
-        persisted state. If this was the last compare tab, disable autostart.
-        Sync-back to originals already happened via on_save when the user
-        saved; if the user discarded, we just delete the temp files.
+        for fn in filenames:
+            if TIMESTAMP_BEGIN in fn and fn.endswith(TIMESTAMP_END):
+                # don't reopen file from 'differ_backup'
+                pass
+            else:
+                ct.file_open(fn, options='/nohistory')
 
-        During app exit, temp files and autostart are preserved so the
-        compare tab can be restored after restart."""
-        tab_id = ed_self.get_prop(ct.PROP_TAB_ID)
-        entry = self._unregister_compare_tab(tab_id)
-        if entry is None:
-            return  # not a compare tab
+    def on_close_pre(self, ed_self: ct.Editor):
 
-        # Remove from in-memory scroll set.
-        try:
-            self.scroll.tab_id.discard(int(tab_id))
-        except (ValueError, TypeError):
-            pass
+        title = ed_self.get_prop(ct.PROP_TAB_TITLE, '')
+        if title in self.diff_tabs:
+            self.diff_tabs.remove(title)
 
-        # During app exit, keep temp files and autostart subscription
-        # so compare tabs persist restarts and the plugin auto-loads.
-        # Re-register since we already unregistered above.
-        if getattr(self, '_app_exiting', False):
-            self._register_compare_tab(
-                tab_id,
-                entry.get('pairs', []),
-                entry.get('session', '')
-            )
-            return
-
-        # Delete temp files for this compare tab. Sync-back to originals
-        # is NOT done here -- it only happens via on_save when the user
-        # explicitly saves inside the diff tab. If the user chose Discard,
-        # the temp files are deleted and originals keep their last-saved
-        # content (or unchanged if never saved).
-        pairs = entry.get('pairs', []) if isinstance(entry, dict) else []
-        for p in pairs:
-            if not isinstance(p, dict):
-                continue
-            fn = p.get('temp_fn', '')
-            if not fn:
-                continue
-            try:
-                if os.path.isfile(fn):
-                    os.unlink(fn)
-            except OSError as ex:
-                msg('failed to delete temp file "{}": {}'.format(fn, ex), level=2)
-
-        # If no more compare tabs are open, disable autostart so the
-        # plugin does not load on next startup (no overhead).
-        state = self._load_state()
-        if not state['compare_tabs']:
-            self._disable_autostart()
+            # avoid 'combined' tab title 'name1 | name2' saved to 'history files.json'
+            ed_self.set_prop(ct.PROP_TAB_TITLE, '')
 
     def move_to_sep_tabs_timer(self, tag='', info=''):
 
         e = ct.Editor(int(info))
         self.move_to_sep_tabs_ex(e)
+
+    def on_exit(self, ed_self):
+
+        opt = ctx.get_opt('ui_one_instance', True)
+        if opt:
+            if os.path.isdir(TEMP_DIR):
+                delete_all_files_in_folder(TEMP_DIR)

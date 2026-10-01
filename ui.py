@@ -1,5 +1,4 @@
 import os
-import json
 import cudatext as ct
 import cudax_lib as appx
 
@@ -7,43 +6,27 @@ from cudax_lib import get_translation
 _ = get_translation(__file__)  # I18N
 
 
-# Path to the shared state file (same as in __init__.py).
-_STATE_FILE = os.path.join(ct.app_path(ct.APP_DIR_SETTINGS), 'cuda_differ_state.json')
-
-
 class FileHistory:
-    """Stores recently-used filenames for the Differ file-picker dropdowns.
-    Persisted inside cuda_differ_state.json under the 'file_history' key
-    (shared with compare-tab state) to keep all Differ state in one file."""
+    items = []
+    section = 'recents'
 
     def __init__(self):
+        self.filename = os.path.join(ct.app_path(ct.APP_DIR_SETTINGS), 'cuda_differ_history.ini')
         self.max_size = appx.get_opt('ui_max_history_files', 25)
-        self.items = []
-
-    def _read_state(self):
-        try:
-            with open(_STATE_FILE, 'r', encoding='utf8') as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return {}
-        return data if isinstance(data, dict) else {}
-
-    def _write_state(self, data):
-        try:
-            with open(_STATE_FILE, 'w', encoding='utf8') as f:
-                json.dump(data, f, indent=2)
-        except OSError:
-            pass
+        # print('Differ history max_size:', self.max_size)
 
     def load(self):
-        data = self._read_state()
-        items = data.get('file_history', [])
-        self.items = items if isinstance(items, list) else []
+        self.items = []
+        for i in range(self.max_size):
+            fn = ct.ini_read(self.filename, self.section, str(i), '')
+            if not fn:
+                break
+            self.items.append(fn)
 
     def save(self):
-        data = self._read_state()
-        data['file_history'] = self.items
-        self._write_state(data)
+        ct.ini_proc(ct.INI_DELETE_SECTION, self.filename, self.section, '')
+        for (i, item) in enumerate(self.items):
+            ct.ini_write(self.filename, self.section, str(i), item)
 
     def add(self, item):
         if not item:

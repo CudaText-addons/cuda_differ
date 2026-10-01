@@ -1,19 +1,3 @@
-2026.07.27 (by @badrelmers)
-+ add: compare tabs now persist across CudaText restarts -- temp files, scroll sync, and all compare state are restored automatically
-+ add: changes saved in a compare tab are synced back to the original files automatically, so editing in the compare view updates the originals
-+ add: saving one side of a compare tab also saves the other side, so a single Ctrl+S handles both files
-+ add: original files on disk are saved automatically when synced; untitled tabs are only marked modified (no Save dialog)
-+ add: plugin auto-loads on startup only when compare tabs are active, so there is no overhead when not comparing
-+ add: closing the last compare tab disables auto-load on next startup
-+ add: temp files are deleted only when their compare tab is closed (not on app exit), enabling restart persistence
-* change: original tabs are no longer closed when starting a compare -- they stay open alongside the compare tab
-* change: synced changes preserve Undo/Redo history in the original tabs
-* change: recent-files history is now stored inside the shared state file instead of a separate .ini file
-* change: tab identification uses the new persistent PROP_TAB_ID instead of mutable tab titles, fixing sync after restart or rename
-* change: cleanup (temp file deletion, state unregister) moved from on_close_pre to on_close so Cancel in the save dialog leaves the compare tab intact
-* change: temp filenames now embed the original tab's persistent identifier, so sync works even after renames or restarts
-- fix: comparing untitled tabs no longer loses changes on save -- edits in the compare view are applied to the original untitled tabs
-
 2026.07.08
 - fix: avoid deprecated API: PROP_SCROLL_HORZ_SMOOTH
 
